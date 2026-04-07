@@ -243,19 +243,16 @@ async function getBulkImportJob(jobId) {
 }
 
 async function waitForBulkImportJob(jobId, options = {}) {
-    const {
-        maxAttempts = 24, // 24 * 5s = 2 minutes
-        intervalMs = 5000,
-    } = options;
+    const { maxAttempts = 24, intervalMs = 5000 } = options;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const job = await getBulkImportJob(jobId);
         const attrs = job?.data?.attributes || {};
-        const status = attrs.status || "unknown";
+        const status = String(attrs.status || "unknown").toLowerCase();
 
         console.log(`Bulk import job ${jobId} status: ${status} (attempt ${attempt}/${maxAttempts})`);
 
-        if (status === "completed") {
+        if (status === "complete" || status === "completed") {
             return job;
         }
 
