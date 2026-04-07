@@ -347,6 +347,8 @@ async function main() {
         return;
     }
 
+    const profilePayload = normalized.map(toKlaviyoProfile);
+
     console.log("Bulk importing profiles into Klaviyo...");
     const jobId = await bulkImportProfiles(profilePayload);
     console.log("Bulk import job:", jobId);
