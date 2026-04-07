@@ -1,0 +1,11 @@
+{
+    "name": "hs-klaviyo",
+    "version": "1.0.0",
+    "type": "module",
+    "scripts": {
+        "start": "node src/sync.js"
+    },
+    "dependencies": {
+        "dotenv": "^16.4.5"
+    }
+}
