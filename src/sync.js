@@ -7,6 +7,8 @@ const {
     HUBSPOT_LIST_ID,
     KLAVIYO_LIST_ID,
     NURTURE_PROPERTY = "nurture",
+    INDUSTRY_TYPE_PROPERTY = "industry_type",
+    INDUSTRY_TYPE_WEB_PROPERTY = "industry_type_web",
 } = process.env;
 
 if (!HUBSPOT_TOKEN || !KLAVIYO_API_KEY || !KLAVIYO_REVISION || !HUBSPOT_LIST_ID || !KLAVIYO_LIST_ID) {
@@ -108,9 +110,15 @@ async function getHubSpotListMemberIds(listId) {
 
 async function getContact(contactId) {
     const params = new URLSearchParams();
-    ["email", "firstname", "lastname", "hubspot_owner_id", NURTURE_PROPERTY].forEach((p) =>
-        params.append("properties", p),
-    );
+    [
+        "email",
+        "firstname",
+        "lastname",
+        "hubspot_owner_id",
+        NURTURE_PROPERTY,
+        INDUSTRY_TYPE_PROPERTY,
+        INDUSTRY_TYPE_WEB_PROPERTY,
+    ].forEach((p) => params.append("properties", p));
 
     return hubspotFetch(`/crm/v3/objects/contacts/${contactId}?${params.toString()}`);
 }
@@ -128,7 +136,7 @@ async function getDeal(dealId) {
 
 async function getCompany(companyId) {
     const params = new URLSearchParams();
-    ["name", "hubspot_owner_id", "industry"].forEach((p) => params.append("properties", p));
+    ["name", "hubspot_owner_id"].forEach((p) => params.append("properties", p));
     return hubspotFetch(`/crm/v3/objects/companies/${companyId}?${params.toString()}`);
 }
 
@@ -161,7 +169,8 @@ async function buildNormalizedRecord(contactId, ownersMap) {
         companyId: company?.id ? String(company.id) : null,
         dealId: deal?.id ? String(deal.id) : null,
         nurture: contactProps[NURTURE_PROPERTY] ?? null,
-        industry: company?.properties?.industry || null,
+        industryType: contactProps[INDUSTRY_TYPE_PROPERTY] ?? null,
+        industryTypeWeb: contactProps[INDUSTRY_TYPE_WEB_PROPERTY] ?? null,
 
         contactOwnerId: contactProps.hubspot_owner_id || null,
         contactOwner: ownerLabel(contactProps.hubspot_owner_id, ownersMap),
@@ -182,7 +191,8 @@ function toKlaviyoProfile(record) {
             email: record.email,
             properties: {
                 hubspot_nurture: record.nurture,
-                hubspot_industry: record.industry,
+                hubspot_industry_type: record.industryType,
+                hubspot_industry_type_web: record.industryTypeWeb,
                 hubspot_contact_owner: record.contactOwner,
                 hubspot_contact_owner_id: record.contactOwnerId,
                 hubspot_deal_name: record.dealName,
