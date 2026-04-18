@@ -208,19 +208,70 @@ function toKlaviyoProfile(record) {
     };
 }
 
-async function bulkImportProfiles(profiles) {
-    const data = await klaviyoFetch("/profile-bulk-import-jobs", {
-        method: "POST",
-        body: JSON.stringify({
-            data: {
-                type: "profile-bulk-import-job",
-                attributes: {
-                    profiles: {
-                        data: profiles,
-                    },
+function buildBulkImportBody(profiles) {
+    return {
+        data: {
+            type: "profile-bulk-import-job",
+            attributes: {
+                profiles: {
+                    data: profiles,
                 },
             },
-        }),
+        },
+    };
+}
+
+function getJsonSizeBytes(value) {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function getProfileSizeBytes(profile) {
+    return Buffer.byteLength(JSON.stringify(profile), "utf8");
+}
+
+function chunkProfilesBySize(profiles, maxBytes = 4_500_000) {
+    const batches = [];
+    let currentBatch = [];
+
+    for (const profile of profiles) {
+        const singleProfileSize = getProfileSizeBytes(profile);
+
+        if (singleProfileSize > maxBytes) {
+            throw new Error(
+                `Single profile too large to import safely: ${profile?.attributes?.email || "(unknown)"} -> ${singleProfileSize} bytes`,
+            );
+        }
+
+        const testBatch = [...currentBatch, profile];
+        const testBody = buildBulkImportBody(testBatch);
+        const testSize = getJsonSizeBytes(testBody);
+
+        if (currentBatch.length > 0 && testSize > maxBytes) {
+            batches.push(currentBatch);
+            currentBatch = [profile];
+        } else {
+            currentBatch = testBatch;
+        }
+    }
+
+    if (currentBatch.length) {
+        batches.push(currentBatch);
+    }
+
+    return batches;
+}
+
+async function bulkImportProfiles(profiles) {
+    const body = buildBulkImportBody(profiles);
+    const sizeBytes = getJsonSizeBytes(body);
+
+    console.log(
+        `Klaviyo bulk import payload: ${profiles.length} profiles, ${sizeBytes} bytes (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`,
+    );
+
+    const data = await klaviyoFetch("/profile-bulk-import-jobs", {
+        method: "POST",
+        body: JSON.stringify(body),
     });
 
     return data?.data?.id || null;
@@ -356,15 +407,36 @@ async function main() {
 
     const profilePayload = normalized.map(toKlaviyoProfile);
 
-    console.log("Bulk importing profiles into Klaviyo...");
-    const jobId = await bulkImportProfiles(profilePayload);
-    console.log("Bulk import job:", jobId);
+    const largestProfiles = profilePayload
+        .map((profile) => ({
+            email: profile?.attributes?.email || "(unknown)",
+            sizeBytes: getProfileSizeBytes(profile),
+        }))
+        .sort((a, b) => b.sizeBytes - a.sizeBytes)
+        .slice(0, 10);
 
-    if (!jobId) {
-        throw new Error("Klaviyo bulk import did not return a job ID.");
+    console.log("Largest profile payloads:");
+    largestProfiles.forEach((row, i) => {
+        console.log(`${i + 1}. ${row.email} -> ${row.sizeBytes} bytes`);
+    });
+
+    const importBatches = chunkProfilesBySize(profilePayload);
+
+    console.log(`Split ${profilePayload.length} profiles into ${importBatches.length} Klaviyo import batch(es).`);
+
+    for (let i = 0; i < importBatches.length; i++) {
+        const batch = importBatches[i];
+        console.log(`Importing batch ${i + 1}/${importBatches.length} with ${batch.length} profile(s)...`);
+
+        const jobId = await bulkImportProfiles(batch);
+        console.log(`Bulk import job for batch ${i + 1}:`, jobId);
+
+        if (!jobId) {
+            throw new Error(`Klaviyo bulk import batch ${i + 1} did not return a job ID.`);
+        }
+
+        await waitForBulkImportJob(jobId);
     }
-
-    await waitForBulkImportJob(jobId);
 
     console.log("Resolving Klaviyo profile IDs...");
     const profileIds = [];
@@ -388,7 +460,8 @@ async function main() {
     console.log({
         hubspotMembers: contactIds.length,
         prepared: normalized.length,
-        skipped,
+        skippedCount: skipped.length,
+        stats,
         klaviyoProfilesAdded: profileIds.length,
     });
 }
