@@ -9,7 +9,16 @@ const {
     NURTURE_PROPERTY = "nurture",
     INDUSTRY_TYPE_PROPERTY = "industry_type",
     INDUSTRY_TYPE_WEB_PROPERTY = "industry_type_web",
+    DEBUG = "false",
 } = process.env;
+
+const isDebug = DEBUG === "true";
+
+function debugLog(...args) {
+    if (isDebug) {
+        console.log(...args);
+    }
+}
 
 if (!HUBSPOT_TOKEN || !KLAVIYO_API_KEY || !KLAVIYO_REVISION || !HUBSPOT_LIST_ID || !KLAVIYO_LIST_ID) {
     throw new Error("Missing required env vars.");
@@ -28,43 +37,100 @@ async function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function hubspotFetch(path, options = {}) {
-    const res = await fetch(`${HUBSPOT_BASE}${path}`, {
-        ...options,
-        headers: {
-            Authorization: `Bearer ${HUBSPOT_TOKEN}`,
-            "Content-Type": "application/json",
-            ...(options.headers || {}),
-        },
-    });
+function isRetryableError(error) {
+    const message = String(error?.message || "");
 
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`HubSpot ${res.status} ${path}: ${text}`);
+    return (
+        message.includes("fetch failed") ||
+        message.includes("ECONNRESET") ||
+        message.includes("ETIMEDOUT") ||
+        /\b429\b/.test(message) ||
+        /\b500\b/.test(message) ||
+        /\b502\b/.test(message) ||
+        /\b503\b/.test(message) ||
+        /\b504\b/.test(message)
+    );
+}
+
+async function withRetry(fn, options = {}) {
+    const { label = "request", maxAttempts = 4, baseDelayMs = 1000 } = options;
+
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+
+            if (!isRetryableError(error) || attempt === maxAttempts) {
+                throw error;
+            }
+
+            const delayMs = baseDelayMs * attempt;
+            console.warn(`${label} failed (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs}ms...`);
+            await sleep(delayMs);
+        }
     }
 
-    return res.json();
+    throw lastError;
+}
+
+async function hubspotFetch(path, options = {}) {
+    return withRetry(
+        async () => {
+            const res = await fetch(`${HUBSPOT_BASE}${path}`, {
+                ...options,
+                headers: {
+                    Authorization: `Bearer ${HUBSPOT_TOKEN}`,
+                    "Content-Type": "application/json",
+                    ...(options.headers || {}),
+                },
+            });
+
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`HubSpot ${res.status} ${path}: ${text}`);
+            }
+
+            return res.json();
+        },
+        {
+            label: `HubSpot ${path}`,
+            maxAttempts: 4,
+            baseDelayMs: 1000,
+        },
+    );
 }
 
 async function klaviyoFetch(path, options = {}) {
-    const res = await fetch(`${KLAVIYO_BASE}${path}`, {
-        ...options,
-        headers: {
-            Authorization: `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
-            revision: KLAVIYO_REVISION,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            ...(options.headers || {}),
+    return withRetry(
+        async () => {
+            const res = await fetch(`${KLAVIYO_BASE}${path}`, {
+                ...options,
+                headers: {
+                    Authorization: `Klaviyo-API-Key ${KLAVIYO_API_KEY}`,
+                    revision: KLAVIYO_REVISION,
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(options.headers || {}),
+                },
+            });
+
+            if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Klaviyo ${res.status} ${path}: ${text}`);
+            }
+
+            if (res.status === 204) return null;
+            return res.json();
         },
-    });
-
-    if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Klaviyo ${res.status} ${path}: ${text}`);
-    }
-
-    if (res.status === 204) return null;
-    return res.json();
+        {
+            label: `Klaviyo ${path}`,
+            maxAttempts: 4,
+            baseDelayMs: 1000,
+        },
+    );
 }
 
 async function getOwnersMap() {
@@ -330,6 +396,8 @@ async function waitForBulkImportJob(jobId, options = {}) {
 }
 
 async function main() {
+    const startedAt = Date.now();
+
     console.log("Loading HubSpot owners...");
     const ownersMap = await getOwnersMap();
 
@@ -349,6 +417,8 @@ async function main() {
         missingCompanyOwner: 0,
     };
 
+    const enrichmentStartedAt = Date.now();
+
     for (const contactId of contactIds) {
         try {
             const record = await buildNormalizedRecord(contactId, ownersMap);
@@ -366,38 +436,38 @@ async function main() {
 
             if (!record.dealId) {
                 stats.missingDeal += 1;
-                console.log(`No deal for ${record.email}`);
+                debugLog(`No deal for ${record.email}`);
             }
 
             if (!record.companyId) {
                 stats.missingCompany += 1;
-                console.log(`No company for ${record.email}`);
+                debugLog(`No company for ${record.email}`);
             }
 
             if (!record.contactOwnerId) {
                 stats.missingContactOwner += 1;
-                console.log(`No contact owner for ${record.email}`);
+                debugLog(`No contact owner for ${record.email}`);
             }
 
             if (record.dealId && !record.dealOwnerId) {
                 stats.missingDealOwner += 1;
-                console.log(`No deal owner for ${record.email}`);
+                debugLog(`No deal owner for ${record.email}`);
             }
 
             if (record.companyId && !record.companyOwnerId) {
                 stats.missingCompanyOwner += 1;
-                console.log(`No company owner for ${record.email}`);
+                debugLog(`No company owner for ${record.email}`);
             }
 
             normalized.push(record);
-            console.log(`Prepared ${record.email}`);
-            await sleep(100);
+            debugLog(`Prepared ${record.email}`);
         } catch (err) {
             console.error(`Failed on contact ${contactId}:`, err.message);
             skipped.push({ contactId, reason: "build_failed", error: err.message });
         }
     }
 
+    console.log(`Enrichment phase took ${((Date.now() - enrichmentStartedAt) / 1000).toFixed(1)}s`);
     console.log(`Prepared ${normalized.length} record(s), skipped ${skipped.length}.`);
 
     if (!normalized.length) {
@@ -405,6 +475,7 @@ async function main() {
         return;
     }
 
+    const importStartedAt = Date.now();
     const profilePayload = normalized.map(toKlaviyoProfile);
 
     const largestProfiles = profilePayload
@@ -415,9 +486,9 @@ async function main() {
         .sort((a, b) => b.sizeBytes - a.sizeBytes)
         .slice(0, 10);
 
-    console.log("Largest profile payloads:");
+    debugLog("Largest profile payloads:");
     largestProfiles.forEach((row, i) => {
-        console.log(`${i + 1}. ${row.email} -> ${row.sizeBytes} bytes`);
+        debugLog(`${i + 1}. ${row.email} -> ${row.sizeBytes} bytes`);
     });
 
     const importBatches = chunkProfilesBySize(profilePayload);
@@ -438,32 +509,54 @@ async function main() {
         await waitForBulkImportJob(jobId);
     }
 
+    console.log(`Klaviyo import phase took ${((Date.now() - importStartedAt) / 1000).toFixed(1)}s`);
+    const listMembershipStartedAt = Date.now();
     console.log("Resolving Klaviyo profile IDs...");
     const profileIds = [];
+    const failedProfileLookups = [];
+
     for (const record of normalized) {
-        const profileId = await getKlaviyoProfileIdByEmail(record.email);
-        if (profileId) {
-            profileIds.push(profileId);
-            console.log(`Resolved ${record.email} -> ${profileId}`);
-        } else {
-            console.warn(`No Klaviyo profile found yet for ${record.email}`);
+        try {
+            const profileId = await getKlaviyoProfileIdByEmail(record.email);
+
+            if (profileId) {
+                profileIds.push(profileId);
+                debugLog(`Resolved ${record.email} -> ${profileId}`);
+            } else {
+                console.warn(`No Klaviyo profile found yet for ${record.email}`);
+                failedProfileLookups.push({
+                    email: record.email,
+                    reason: "not_found",
+                });
+            }
+        } catch (err) {
+            console.error(`Failed Klaviyo lookup for ${record.email}: ${err.message}`);
+            failedProfileLookups.push({
+                email: record.email,
+                reason: err.message,
+            });
         }
-        await sleep(100);
+    }
+
+    if (isDebug && failedProfileLookups.length) {
+        console.log("Sample failed Klaviyo lookups:", failedProfileLookups.slice(0, 20));
     }
 
     if (profileIds.length) {
         console.log(`Adding ${profileIds.length} profile(s) to Klaviyo list...`);
         await addProfilesToKlaviyoList(profileIds);
     }
-
-    console.log("Done.");
+    console.log(`List membership phase took ${((Date.now() - listMembershipStartedAt) / 1000).toFixed(1)}s`);
+    console.log(`Total runtime: ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
     console.log({
         hubspotMembers: contactIds.length,
         prepared: normalized.length,
         skippedCount: skipped.length,
         stats,
         klaviyoProfilesAdded: profileIds.length,
+        failedProfileLookupsCount: failedProfileLookups.length,
     });
+    console.log("Done.");
 }
 
 main().catch((err) => {
